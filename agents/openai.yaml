@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repair Computer Use"
+  short_description: "Safely repair Codex bundled Computer Use"
+  default_prompt: "Use $repair-computer-use to diagnose and repair Codex Desktop openai-bundled chrome and computer-use plugins on Windows without resetting user config."
