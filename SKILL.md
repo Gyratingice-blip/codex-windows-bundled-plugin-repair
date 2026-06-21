@@ -63,11 +63,25 @@ If both runtime relocation and Chrome native host are broken, combine the explic
 powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -SetRuntimeEnv -RepairChromeNativeHost
 ```
 
-6. Restart Codex Desktop after `-Repair -SetRuntimeEnv` or `-RepairChromeNativeHost`.
+6. If inspect mode reports runtime drift after a Codex Desktop / Microsoft Store update, synchronize the local runtime from the current AppX package:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -RepairRuntimeDrift
+```
+
+Runtime drift means the active or relocated `%LOCALAPPDATA%\OpenAI\Codex\bin\codex.exe`, `node_repl.exe`, or helper executables no longer match the current `OpenAI.Codex` AppX package. This can break new thread/task creation with errors such as `Invalid request: missing field inputSchema`.
+
+If the runtime files are locked by a running Codex Desktop/app-server process, close Codex and rerun the command above. If you intentionally want the repair script to close and relaunch Codex for you, use the explicit force switch:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -RepairRuntimeDrift -ForceRestartCodex
+```
+
+7. Restart Codex Desktop after `-Repair -SetRuntimeEnv`, `-RepairRuntimeDrift`, or `-RepairChromeNativeHost` unless `-ForceRestartCodex` already relaunched it.
 
 `-SetRuntimeEnv` also copies `codex-command-runner.exe` and `codex-windows-sandbox-setup.exe` next to the relocated `codex.exe`. This matters when logs show `windows sandbox failed: spawn setup refresh` or `codex-windows-sandbox-setup.exe: program not found` after moving Codex runtime binaries out of WindowsApps.
 
-7. If inspect mode reports stale `openai-bundled` version references in `config.toml`, repair them only with the explicit stale-config switch:
+8. If inspect mode reports stale `openai-bundled` version references in `config.toml`, repair them only with the explicit stale-config switch:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -RepairStaleConfigRefs
@@ -75,7 +89,7 @@ powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComp
 
 This switch updates stale plugin cache version segments in `%USERPROFILE%\.codex\config.toml` only after the expected cache directory exists. It does not rewrite `.codex-global-state.json`.
 
-8. Verify CLI state:
+9. Verify CLI state:
 
 ```powershell
 $codex = "$env:LOCALAPPDATA\OpenAI\Codex\bin\codex.exe"
@@ -205,6 +219,8 @@ It also copies these helper executables to the same directory without setting en
 ```
 
 Only use `-SetRuntimeEnv` when plugin/cache repair alone is not enough or when logs show Codex cannot relocate or launch bundled executables from WindowsApps.
+
+`-RepairRuntimeDrift` uses the same current AppX package as the source of truth, but is specifically for update drift after runtime relocation. It also updates runtime-related `config.toml` values such as `BROWSER_USE_CODEX_APP_VERSION`, `CODEX_CLI_PATH`, `NODE_REPL_NODE_PATH`, and the trusted `browser-client.mjs` hashes when those entries are present.
 
 ## Update-Safe Checks
 

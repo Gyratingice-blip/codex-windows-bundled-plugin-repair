@@ -17,6 +17,8 @@ param(
     [switch]$SkipChromeNativeHostCheck,
     [switch]$RepairChromeNativeHost,
     [switch]$RepairStaleConfigRefs,
+    [switch]$RepairRuntimeDrift,
+    [switch]$ForceRestartCodex,
     [string]$MarketplaceName = "openai-bundled",
     [string[]]$TargetPlugins = @("chrome", "computer-use"),
     [string]$CodexHome = $(if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }),
@@ -35,6 +37,12 @@ if ($RepairChromeNativeHost -and -not $Repair) {
 }
 if ($RepairStaleConfigRefs -and -not $Repair) {
     throw "-RepairStaleConfigRefs requires -Repair."
+}
+if ($RepairRuntimeDrift -and -not $Repair) {
+    throw "-RepairRuntimeDrift requires -Repair."
+}
+if ($ForceRestartCodex -and -not ($RepairRuntimeDrift -or $SetRuntimeEnv)) {
+    throw "-ForceRestartCodex requires -RepairRuntimeDrift or -SetRuntimeEnv."
 }
 if (-not $CheckChromeNativeHost -and -not $SkipChromeNativeHostCheck) {
     $CheckChromeNativeHost = $true
@@ -421,6 +429,233 @@ function Find-NodeReplExecutable {
         }
     }
     return $null
+}
+
+function Get-ExecutableVersionText {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+    try {
+        $output = & $Path --version 2>&1
+        if ($LASTEXITCODE -eq 0 -and $output) {
+            return [string]($output | Select-Object -First 1)
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
+
+function Get-CodexAppVersionString {
+    param([Parameter(Mandatory)]$Package)
+    $version = [string]$Package.Version
+    if ($version.EndsWith(".0")) {
+        return $version.Substring(0, $version.Length - 2)
+    }
+    return $version
+}
+
+function Get-RuntimeExecutableRows {
+    param(
+        [Parameter(Mandatory)][string]$ResourcesRoot,
+        [Parameter(Mandatory)][string]$LocalBin
+    )
+    $rows = [System.Collections.ArrayList]::new()
+    foreach ($exe in @("codex.exe", "node.exe", "node_repl.exe", "codex-command-runner.exe", "codex-windows-sandbox-setup.exe")) {
+        $source = Find-BundledExecutable -ResourcesRoot $ResourcesRoot -FileName $exe
+        $destination = Join-Path $LocalBin $exe
+        $sourceHash = $null
+        $destinationHash = $null
+        $sourceVersion = $null
+        $destinationVersion = $null
+        if ($source -and (Test-Path -LiteralPath $source)) {
+            try { $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash } catch {}
+            if ($exe -eq "codex.exe") { $sourceVersion = Get-ExecutableVersionText -Path $source }
+        }
+        if (Test-Path -LiteralPath $destination) {
+            try { $destinationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash } catch {}
+            if ($exe -eq "codex.exe") { $destinationVersion = Get-ExecutableVersionText -Path $destination }
+        }
+        [void]$rows.Add([pscustomobject]@{
+            FileName = $exe
+            Source = $source
+            Destination = $destination
+            SourceExists = [bool]($source -and (Test-Path -LiteralPath $source))
+            DestinationExists = [bool](Test-Path -LiteralPath $destination)
+            SourceHash = $sourceHash
+            DestinationHash = $destinationHash
+            HashMatch = [bool]($sourceHash -and $destinationHash -and ($sourceHash -eq $destinationHash))
+            SourceVersion = $sourceVersion
+            DestinationVersion = $destinationVersion
+        })
+    }
+    return ,$rows
+}
+
+function Report-RuntimeDrift {
+    param(
+        [Parameter(Mandatory)][string]$ResourcesRoot
+    )
+    $localBin = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin"
+    $activeCodex = Find-CodexCli
+    $bundledCodex = Find-BundledExecutable -ResourcesRoot $ResourcesRoot -FileName "codex.exe"
+    $activeVersion = Get-ExecutableVersionText -Path $activeCodex
+    $bundledVersion = Get-ExecutableVersionText -Path $bundledCodex
+    Write-Info "Active Codex CLI: $activeCodex"
+    Write-Info "Active Codex CLI version: $activeVersion"
+    Write-Info "Bundled Codex CLI: $bundledCodex"
+    Write-Info "Bundled Codex CLI version: $bundledVersion"
+    if ($activeVersion -and $bundledVersion -and ($activeVersion -ne $bundledVersion)) {
+        Write-Info "RUNTIME DRIFT: active codex.exe version differs from the current AppX bundled codex.exe."
+    }
+    elseif ($activeVersion -and $bundledVersion) {
+        Write-Info "OK: active codex.exe version matches the current AppX bundled codex.exe."
+    }
+
+    $rows = Get-RuntimeExecutableRows -ResourcesRoot $ResourcesRoot -LocalBin $localBin
+    foreach ($row in $rows) {
+        if (-not $row.SourceExists) {
+            Write-Info "RUNTIME SKIP source missing: $($row.FileName)"
+        }
+        elseif (-not $row.DestinationExists) {
+            Write-Info "RUNTIME MISSING local destination: $($row.FileName) -> $($row.Destination)"
+        }
+        elseif ($row.HashMatch) {
+            Write-Info "RUNTIME OK: $($row.FileName)"
+        }
+        else {
+            Write-Info "RUNTIME DRIFT: $($row.FileName) hash differs from current AppX bundled file."
+        }
+    }
+}
+
+function Get-BrowserClientHashes {
+    param(
+        [Parameter(Mandatory)][string[]]$CandidateRoots
+    )
+    $hashes = [System.Collections.ArrayList]::new()
+    foreach ($root in $CandidateRoots) {
+        if (-not $root) { continue }
+        $path = Join-Path $root "scripts\browser-client.mjs"
+        if (Test-Path -LiteralPath $path) {
+            try {
+                $hash = ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash).ToLowerInvariant()
+                if (-not ($hashes -contains $hash)) {
+                    [void]$hashes.Add($hash)
+                }
+            }
+            catch {
+                Write-Info "Could not hash browser-client.mjs at ${path}: $($_.Exception.Message)"
+            }
+        }
+    }
+    return ,$hashes
+}
+
+function Repair-RuntimeConfigReferences {
+    param(
+        [Parameter(Mandatory)][string]$CodexHome,
+        [Parameter(Mandatory)][string]$ResourcesRoot,
+        [Parameter(Mandatory)]$Package,
+        [Parameter(Mandatory)][string]$FixedRoot,
+        [Parameter(Mandatory)][string]$MarketplaceName
+    )
+    $configPath = Join-Path $CodexHome "config.toml"
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        Write-Info "Runtime config repair skipped, missing: $configPath"
+        return
+    }
+
+    $localBin = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin"
+    $codexCli = Join-Path $localBin "codex.exe"
+    $node = Join-Path $localBin "node.exe"
+    $nodeRepl = Join-Path $localBin "node_repl.exe"
+    $appVersion = Get-CodexAppVersionString -Package $Package
+
+    $chromeRoots = @(
+        (Join-Path $FixedRoot "plugins\chrome"),
+        (Join-Path $CodexHome "plugins\cache\$MarketplaceName\chrome\latest"),
+        (Join-Path $ResourcesRoot "plugins\$MarketplaceName\plugins\chrome")
+    )
+    $browserHashes = Get-BrowserClientHashes -CandidateRoots $chromeRoots
+
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    $original = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)
+    $updated = $original
+
+    $updated = [regex]::Replace($updated, 'BROWSER_USE_CODEX_APP_VERSION\s*=\s*"[^"]*"', "BROWSER_USE_CODEX_APP_VERSION = `"$appVersion`"")
+    $updated = [regex]::Replace($updated, "CODEX_CLI_PATH\s*=\s*'[^']*'", "CODEX_CLI_PATH = '$codexCli'")
+    $updated = [regex]::Replace($updated, "NODE_REPL_NODE_PATH\s*=\s*'[^']*'", "NODE_REPL_NODE_PATH = '$node'")
+    $updated = [regex]::Replace($updated, "CODEX_NODE_REPL_PATH\s*=\s*'[^']*'", "CODEX_NODE_REPL_PATH = '$nodeRepl'")
+
+    if ($browserHashes.Count -gt 0 -and $updated -match 'NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S\s*=\s*"(?<hashes>[^"]*)"') {
+        $existing = @()
+        if ($Matches["hashes"]) {
+            $existing = $Matches["hashes"].Split(",") | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ }
+        }
+        $combined = [System.Collections.ArrayList]::new()
+        foreach ($hash in $existing + @($browserHashes)) {
+            if ($hash -and -not ($combined -contains $hash)) {
+                [void]$combined.Add($hash)
+            }
+        }
+        $replacement = 'NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "' + (($combined | ForEach-Object { [string]$_ }) -join ",") + '"'
+        $updated = [regex]::Replace($updated, 'NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S\s*=\s*"[^"]*"', $replacement)
+    }
+
+    if ($updated -eq $original) {
+        Write-Info "No runtime config references needed repair in config.toml."
+        return
+    }
+    [System.IO.File]::WriteAllText($configPath, $updated, $utf8NoBom)
+    Write-Info "Updated runtime references in config.toml."
+}
+
+function Stop-CodexRuntimeProcesses {
+    param(
+        [Parameter(Mandatory)][string]$ResourcesRoot,
+        [Parameter(Mandatory)][string]$LocalBin
+    )
+    Write-Info "Stopping Codex Desktop/app-server processes before runtime sync."
+    $resourcesFull = [System.IO.Path]::GetFullPath($ResourcesRoot).TrimEnd("\") + "\"
+    $localBinFull = [System.IO.Path]::GetFullPath($LocalBin).TrimEnd("\") + "\"
+    $targets = Get-CimInstance Win32_Process | Where-Object {
+        ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($localBinFull, [System.StringComparison]::OrdinalIgnoreCase)) -or
+        ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($resourcesFull, [System.StringComparison]::OrdinalIgnoreCase)) -or
+        ($_.Name -ieq "Codex.exe" -and $_.ExecutablePath -like "C:\Program Files\WindowsApps\OpenAI.Codex_*\app\Codex.exe")
+    }
+    foreach ($process in $targets) {
+        try {
+            Write-Info "Stopping $($process.Name)#$($process.ProcessId): $($process.ExecutablePath)"
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+        }
+        catch {
+            Write-Info "Stop skipped/failed for $($process.ProcessId): $($_.Exception.Message)"
+        }
+    }
+
+    for ($i = 0; $i -lt 30; $i++) {
+        $remaining = Get-CimInstance Win32_Process | Where-Object {
+            $_.ExecutablePath -and $_.ExecutablePath.StartsWith($localBinFull, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+        if (-not $remaining) { return }
+        Start-Sleep -Seconds 1
+    }
+    Write-Info "Some Codex runtime processes may still be running after timeout."
+}
+
+function Start-CodexDesktop {
+    param([Parameter(Mandatory)]$Package)
+    $appId = "$($Package.PackageFamilyName)!App"
+    try {
+        Start-Process "explorer.exe" -ArgumentList "shell:AppsFolder\$appId"
+        Write-Info "Relaunched Codex Desktop: $appId"
+    }
+    catch {
+        Write-Info "Could not relaunch Codex Desktop automatically: $($_.Exception.Message)"
+    }
 }
 
 function Invoke-Codex {
@@ -984,6 +1219,9 @@ Test-PluginLatestCaches -SourceRoot $bundledSource -CodexHome $CodexHome -Market
 Write-Step "Inspecting critical file hashes"
 Test-CriticalFileHashes -BundledRoot $bundledSource -FixedRoot $FixedRoot -CodexHome $CodexHome -MarketplaceName $MarketplaceName -ResourcesRoot $resourcesRoot -Plugins $TargetPlugins
 
+Write-Step "Inspecting Codex runtime drift"
+Report-RuntimeDrift -ResourcesRoot $resourcesRoot
+
 Write-Step "Inspecting stale config/state references"
 $staleRows = Get-StaleReferenceRows -CodexHome $CodexHome -MarketplaceName $MarketplaceName -PluginVersions $pluginVersions -CurrentPackageFullName $pkg.PackageFullName
 Report-StaleReferences -Rows $staleRows
@@ -1059,10 +1297,24 @@ if ($RepairStaleConfigRefs) {
     Repair-StaleConfigReferences -CodexHome $CodexHome -MarketplaceName $MarketplaceName -PluginVersions $fixedPluginVersions
 }
 
-if ($SetRuntimeEnv) {
+if ($SetRuntimeEnv -or $RepairRuntimeDrift) {
+    if ($ForceRestartCodex) {
+        Write-Step "Stopping Codex before runtime sync"
+        $localBin = Join-Path $env:LOCALAPPDATA "OpenAI\Codex\bin"
+        Stop-CodexRuntimeProcesses -ResourcesRoot $resourcesRoot -LocalBin $localBin
+    }
+
     Write-Step "Copying runtime executables and setting user environment overrides"
     Set-UserEnvironment -ResourcesRoot $resourcesRoot -BackupDir $backupDir
-    Write-Info "Restart Codex Desktop so the new user environment variables are loaded."
+    Write-Step "Repairing runtime config references"
+    Repair-RuntimeConfigReferences -CodexHome $CodexHome -ResourcesRoot $resourcesRoot -Package $pkg -FixedRoot $FixedRoot -MarketplaceName $MarketplaceName
+    if ($ForceRestartCodex) {
+        Write-Step "Relaunching Codex Desktop"
+        Start-CodexDesktop -Package $pkg
+    }
+    else {
+        Write-Info "Restart Codex Desktop so the new runtime and user environment variables are loaded."
+    }
 }
 
 if ($RepairChromeNativeHost) {
@@ -1081,6 +1333,8 @@ Write-Step "Checking latest cache pointers after repair"
 Test-PluginLatestCaches -SourceRoot $FixedRoot -CodexHome $CodexHome -MarketplaceName $MarketplaceName -Plugins $TargetPlugins
 Write-Step "Checking critical file hashes after repair"
 Test-CriticalFileHashes -BundledRoot $bundledSource -FixedRoot $FixedRoot -CodexHome $CodexHome -MarketplaceName $MarketplaceName -ResourcesRoot $resourcesRoot -Plugins $TargetPlugins
+Write-Step "Checking Codex runtime drift after repair"
+Report-RuntimeDrift -ResourcesRoot $resourcesRoot
 Write-Step "Checking stale config/state references after repair"
 $finalPluginVersions = Get-PluginVersionMap -SourceRoot $FixedRoot -Plugins $TargetPlugins
 $finalStaleRows = Get-StaleReferenceRows -CodexHome $CodexHome -MarketplaceName $MarketplaceName -PluginVersions $finalPluginVersions -CurrentPackageFullName $pkg.PackageFullName

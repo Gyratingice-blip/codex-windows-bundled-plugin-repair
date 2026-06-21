@@ -52,6 +52,18 @@ powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComp
 powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -SetRuntimeEnv
 ```
 
+修复 Codex 更新后的 runtime drift，例如新建对话/任务时报 `Invalid request: missing field inputSchema`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -RepairRuntimeDrift
+```
+
+如果 Codex 正在占用 runtime 文件，并且用户明确允许脚本自动关闭并重启 Codex：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -RepairRuntimeDrift -ForceRestartCodex
+```
+
 Codex 更新后完整修复：
 
 ```powershell
@@ -64,7 +76,7 @@ powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComp
 powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -RepairStaleConfigRefs
 ```
 
-涉及 `-SetRuntimeEnv` 或 `-RepairChromeNativeHost` 后，完全退出并重开 Codex Desktop。
+涉及 `-SetRuntimeEnv`、`-RepairRuntimeDrift` 或 `-RepairChromeNativeHost` 后，完全退出并重开 Codex Desktop；如果使用了 `-ForceRestartCodex`，脚本会尝试自动完成这一步。
 
 ## 修复思路
 
@@ -133,6 +145,8 @@ CODEX_BROWSER_USE_NODE_PATH=%LOCALAPPDATA%\OpenAI\Codex\bin\node.exe
 CODEX_NODE_REPL_PATH=%LOCALAPPDATA%\OpenAI\Codex\bin\node_repl.exe
 ```
 
+`-RepairRuntimeDrift` 专门处理 Codex Desktop / Microsoft Store 更新后的版本漂移：当前 AppX 包中的 `codex.exe` 已更新，但 `%LOCALAPPDATA%\OpenAI\Codex\bin` 中的旧 `codex.exe`、`node_repl.exe` 或 helper 仍被配置引用。脚本会从当前 AppX 包重新同步 runtime，并在存在相关条目时更新 `config.toml` 中的 `BROWSER_USE_CODEX_APP_VERSION`、runtime 路径和 `browser-client.mjs` trusted hash。
+
 ## 验证
 
 CLI 应显示：
@@ -142,6 +156,6 @@ chrome@openai-bundled        installed, enabled
 computer-use@openai-bundled  installed, enabled
 ```
 
-`-InspectOnly` 应显示关键文件 `OK`、hash `HASH OK`、`latest` 指向当前版本，并且没有 stale config/state 引用。
+`-InspectOnly` 应显示关键文件 `OK`、hash `HASH OK`、`latest` 指向当前版本、active/bundled `codex.exe` 版本一致，并且没有 stale config/state 引用。
 
 不要只凭 `plugin list` 判断成功；如果用户报告工具不可用，还要做 runtime 初始化验证。

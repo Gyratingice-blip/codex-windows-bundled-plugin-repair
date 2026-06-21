@@ -21,6 +21,7 @@ This repair is intended for the Windows Store/MSIX Codex app, where bundled plug
 - Checks Chrome native messaging host registration.
 - Optionally repairs the Chrome native host manifest and HKCU registry key.
 - Optionally relocates Codex runtime executables out of `WindowsApps`.
+- Detects and repairs runtime drift after Codex Desktop / Microsoft Store updates.
 - Reports stale config/state references without dumping private config contents.
 
 ## What This Fix Does Not Do
@@ -50,6 +51,18 @@ If Computer Use, Chrome runtime, or `node_repl` still fails after restarting Cod
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -SetRuntimeEnv
+```
+
+If new thread/task creation fails after an update with a schema error such as `Invalid request: missing field inputSchema`, inspect for runtime drift and repair it:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -RepairRuntimeDrift
+```
+
+If Codex runtime files are locked by a running Desktop/app-server process and you want the script to close and relaunch Codex automatically:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -RepairRuntimeDrift -ForceRestartCodex
 ```
 
 If Chrome native host registration is broken:
@@ -91,6 +104,7 @@ Inspect output should also show:
 
 - critical file checks are `OK`,
 - `latest` cache pointers are current,
+- active and bundled `codex.exe` versions match,
 - important hashes are `HASH OK`,
 - Chrome native host check reports `correct: true` when Chrome repair is relevant.
 

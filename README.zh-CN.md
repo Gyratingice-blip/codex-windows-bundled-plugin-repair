@@ -30,6 +30,7 @@ English: [README.md](README.md)
 - 检查 Chrome native messaging host。
 - 可选修复 Chrome native host 注册表和 manifest。
 - 可选复制 Codex runtime helper，避免 WindowsApps 启动限制。
+- 检测并修复 Codex Desktop / Microsoft Store 更新后的 runtime 漂移。
 - 报告并可选修复 `config.toml` 中旧版本插件路径。
 
 ## 它不会做什么
@@ -59,6 +60,18 @@ powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComp
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -SetRuntimeEnv
+```
+
+如果 Codex 更新后新建对话/任务失败，并出现类似 `Invalid request: missing field inputSchema` 的 schema 错误，先检查 runtime drift，再运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -RepairRuntimeDrift
+```
+
+如果 Codex Desktop / app-server 正在占用 runtime 文件，并且你希望脚本自动关闭并重启 Codex：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$skill\scripts\Repair-CodexBundledComputerUse.ps1" -Repair -RepairRuntimeDrift -ForceRestartCodex
 ```
 
 如果 Chrome native host 注册异常：
@@ -100,6 +113,7 @@ computer-use@openai-bundled  installed, enabled
 
 - 关键文件检查为 `OK`
 - `latest` 指向当前版本
+- active 和 bundled `codex.exe` 版本一致
 - 关键文件为 `HASH OK`
 - 没有 stale config/state 引用
 - Chrome native host 在相关场景下为 `correct: true`
